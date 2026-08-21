@@ -1,0 +1,17 @@
+# terms.txt — the list of names this tool removes from your files.
+# Rename this file to terms.txt and keep it next to anonymize_pack.py.
+# You normally receive a filled-in terms.txt separately — it is private,
+# never share it or commit it anywhere public.
+#
+# One entry per line:
+#   plain text        matched case-insensitively, whole word
+#   re:<expression>   a regular expression, for part-number formats
+#
+# Add every customer name, project name, person name (drawn/checked/approved
+# on drawings) and part-number scheme that appears in your files.
+
+# --- examples (replace with your real entries) ---
+ACME CORP
+ACME
+JOHN SMITH
+re:ACM[-_ ]?\d{3,}[\d_-]*

@@ -1,0 +1,5 @@
+terms.txt
+*_CLEAN/
+*_report.txt
+*_rename_map.csv
+__pycache__/
