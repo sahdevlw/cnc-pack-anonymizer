@@ -23,16 +23,28 @@ own final check as well, so you always have a second safety net.
    **"Add Python to PATH"** during install.
 2. **Download this tool**: click the green **Code** button above → *Download
    ZIP*, and unzip it anywhere, e.g. `D:\tools\`.
-3. **Add the terms list**: you received a `terms.txt` file separately —
-   place it in the same folder as `anonymize_pack.py`. (It's the private
-   list of names to remove. `terms.example.txt` shows the format.)
+3. **The terms list** (`terms.txt`, next to the script) is the private list
+   of names the tool removes. You don't have to write it yourself: the tool
+   can **build it for you** — see "Suggest terms" below. If you received a
+   pre-filled `terms.txt` separately, drop it in as a head start.
+   (`terms.example.txt` shows the format.)
 
 ## Cleaning a part (every time)
 
 **Easiest:** double-click **`Clean a Part Folder.bat`** — a simple window
-opens with three steps: choose the part folder, type a neutral name
-(`housing-01`, `bracket-02`, …), click **Clean the pack**. You can also just
-drag a part folder onto the `.bat` file.
+opens: choose the part folder, click **Suggest terms from this pack**, tick
+the customer names / part numbers it found (leave materials, machines and
+ordinary words unticked), type a neutral name (`housing-01`, `bracket-02`,
+…), click **Clean the pack**. You can also drag a part folder onto the
+`.bat` file.
+
+The **Suggest terms** button scans the pack — file names, program comments,
+folder paths stored inside files, CAD author fields — and proposes likely
+customer identifiers for you to confirm with checkboxes. Confirmed terms are
+saved to `terms.txt`, so each pack teaches the tool: the list only grows.
+It is suggestion + your confirmation on purpose — no rule can tell a
+customer's code from a material spec, and wrongly removing machining
+information would damage the files' usefulness.
 
 You get, next to your part folder:
 
