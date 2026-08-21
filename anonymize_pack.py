@@ -166,6 +166,136 @@ def scrub_step(text, patterns):
     return cleaned, hits
 
 
+# ---------------------------------------------------------------------------
+# term auto-detection ("Suggest terms")
+# ---------------------------------------------------------------------------
+
+STOPWORDS = {
+    # G-code / post vocabulary
+    "PROGRAM", "NAME", "PART", "DATE", "TIME", "FILE", "MATERIAL", "TOOL",
+    "LIST", "DIA", "TIP", "RAD", "LENGTH", "POST", "VER", "OPTION", "OUTPUT",
+    "WORKPLANE", "OFFSET", "COMP", "WEAR", "STOCK", "LEAVE", "SETUP",
+    "OPN", "REWORK", "MCAM", "POWERMILL", "MASTERCAM", "FUSION",
+    # operations / tools
+    "MILL", "DRILL", "TAP", "BORE", "REAM", "FACE", "SLOT", "POCKET",
+    "CONTOUR", "CHAMFER", "SPOT", "CENTER", "CENTRE", "FLAT", "ENDMILL",
+    "SHOULDER", "BALL", "BULL", "THREAD", "TEETH", "INSERT", "HOLDER",
+    "ROUGH", "ROUGHING", "FINISH", "FINISHING", "SEMI", "HSS", "TIN",
+    "CARBIDE", "COATED", "RIGHT", "LEFT", "HANDED", "HELICOIL",
+    # materials / stock
+    "ALUMINUM", "ALUMINIUM", "STEEL", "BRASS", "COPPER", "TITANIUM",
+    "PLASTIC", "DELRIN", "SPCC", "SKD", "GRADE", "PLATE", "SHEET", "BAR",
+    "BILLET", "CAST",
+    # machines / controls (the shop's own gear is not a secret)
+    "FANUC", "SIEMENS", "MITSUBISHI", "HEIDENHAIN", "HAAS", "MAZAK",
+    "FEELER", "MORI", "SEIKI", "DMG", "OKUMA", "BROTHER", "MAKINO", "DOOSAN",
+    "HURCO", "CONTROL", "MACHINE", "AXIS", "VMC", "HMC", "CNC",
+    # generic part words (descriptive, not identifying)
+    "HOUSING", "BRACKET", "COVER", "BASE", "FRONT", "REAR", "TOP", "BOTTOM",
+    "SIDE", "UPPER", "LOWER", "LEFT", "RIGHT", "MAIN", "BODY", "FIXTURE",
+    "JOB", "NEW", "OLD", "FINAL", "TEMP", "TEST",
+    # misc header words
+    "PROGRAMMED", "DRAWN", "CHECKED", "APPROVED", "SCALE", "SHEET", "SIZE",
+    "TITLE", "NUMBER", "REVISION", "WEIGHT", "SURFACE", "AREA", "NOTES",
+    "INFO", "MACHINEINFO", "STEP", "MODEL", "DRAWING", "NCPROGRAMS",
+    # filesystem / software noise seen in machine paths
+    "USERS", "APPDATA", "LOCAL", "ROAMING", "PUBLIC", "DOCUMENTS", "DESKTOP",
+    "DOWNLOADS", "PROGRAMDATA", "PARTS", "JOBS", "CAMPATH", "ROHTEIL",
+    "BLUM", "RENISHAW",
+    # fragments of setup words in file names (2NDOPN -> NDOPN etc.)
+    "STOPN", "NDOPN", "RDOPN", "THOPN",
+    # CAM-template comment boilerplate
+    "TOOLPATH", "TOOLPATHS", "ESTIMATED", "DURATION", "HOURS", "MIN", "SEC",
+    "START", "END", "PROG", "CHECK", "CLAMP", "CUTTING", "INSIDE", "OUTER",
+    "INNER", "SHAPE", "CIRCLE", "RECTANG", "OBROUND", "ANGLE", "OTHERS",
+    "THE", "TYPE", "CDR", "EMF", "FMC", "STA",
+}
+
+WINPATH_RE = re.compile(r"[A-Za-z]:\\([^\s()'\"]+)")
+CAPS_TOKEN = re.compile(r"\b[A-Za-z][A-Za-z0-9]{2,}\b")
+
+
+def suggest_terms(folder, patterns):
+    """Mine a pack for likely customer identifiers. Returns
+    [(term, reason, default_on)] sorted by confidence."""
+    src = Path(folder).expanduser().resolve()
+    cand = {}
+
+    def add(term, reason, strong):
+        t = term.strip(" ._-").upper()
+        if len(t) < 3 or (t.isdigit() and len(t) < 5):
+            return
+        if t in STOPWORDS or t.lower() in ("terms", "readme"):
+            return
+        if any(p.search(t) for p in patterns):
+            return                                    # already in terms.txt
+        entry = cand.setdefault(t, [set(), False])
+        entry[0].add(reason)
+        entry[1] = entry[1] or strong
+
+    for f in (p for p in src.rglob("*") if p.is_file()):
+        # 1) file names: alpha words and long numbers are usually job codes
+        for tok in re.findall(r"[A-Za-z]{3,}", f.stem):
+            add(tok, "appears in file names", True)
+        for tok in re.findall(r"\d{5,}", f.stem):
+            add(tok, "number in file names", True)
+
+        raw = f.read_bytes()
+        views = [raw.decode("latin-1", "ignore"),
+                 raw.decode("utf-16-le", "ignore")]
+        # 2) folder names inside machine paths label the job/customer
+        for view in views:
+            for m in WINPATH_RE.finditer(view):
+                for comp in m.group(1).split("\\")[:-1]:
+                    for tok in re.findall(r"[A-Za-z]{3,}", comp):
+                        add(tok, "folder name in a machine path", True)
+
+        ext = f.suffix.lower()
+        if ext in GCODE_EXT and b"\x00" not in raw[:4096]:
+            # 3) unknown words in program comments
+            text = raw.decode("latin-1")
+            for m in NC_COMMENT.finditer(text):
+                inner = m.group(1) or m.group(2) or ""
+                if "\\" in inner:
+                    continue                          # path line, handled above
+                for tok in CAPS_TOKEN.findall(inner):
+                    if tok.isupper() and not any(ch.isdigit() for ch in tok):
+                        add(tok, "word in program comments", False)
+        elif ext in STEP_EXT and b"\x00" not in raw[:4096]:
+            # 4) STEP header author / organisation fields
+            head = raw[:2000].decode("latin-1", "ignore")
+            m = re.search(r"FILE_NAME\s*\((.*?)\);", head, re.DOTALL)
+            if m:
+                strings = re.findall(r"'([^']*)'", m.group(1))
+                for s in strings[2:4]:                # author, organisation
+                    for tok in re.findall(r"[A-Za-z]{3,}", s):
+                        add(tok, "author field in the CAD model", True)
+
+    out = [(t, "; ".join(sorted(r)), strong) for t, (r, strong) in cand.items()]
+    out.sort(key=lambda x: (not x[2], x[0]))
+    return out
+
+
+def append_terms(terms, terms_path=None):
+    """Append confirmed terms to terms.txt (create it if missing)."""
+    path = Path(terms_path) if terms_path else \
+        Path(__file__).resolve().parent / "terms.txt"
+    lines = []
+    if not path.exists():
+        lines.append("# terms.txt - names removed by the anonymizer. "
+                     "KEEP PRIVATE.")
+    existing = path.read_text(encoding="utf-8-sig").splitlines() \
+        if path.exists() else []
+    have = {ln.strip().upper() for ln in existing}
+    for t in terms:
+        if t.upper() not in have:
+            lines.append(t)
+    if lines:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    return path
+
+
 def scan_bytes(data, patterns):
     """Scan a binary blob (ascii + utf-16le views) for identifiers."""
     found = set()
@@ -438,6 +568,77 @@ def run_gui():
               command=choose).pack(side="left")
     folder_lbl.pack(side="left", padx=10, fill="x", expand=True)
 
+    def refresh_terms_label():
+        lits, regs, tf = load_terms()
+        n = len(lits) + len(regs)
+        terms_lbl.config(fg=("#0a7d32" if tf else "#b00020"),
+                         text=(f"Terms list: {n} entries loaded ({tf.name})"
+                               if tf else "Terms list MISSING - use 'Suggest "
+                               "terms' below or add terms.txt, then clean."))
+
+    def suggest():
+        if not state["folder"]:
+            messagebox.showwarning("Choose a folder",
+                                   "Step 1 first: choose the part folder.")
+            return
+        lits, regs, _ = load_terms()
+        found = suggest_terms(state["folder"], build_patterns(lits, regs))
+        if not found:
+            messagebox.showinfo("Suggest terms",
+                                "No new identifier candidates found in this "
+                                "pack.")
+            return
+        top = tk.Toplevel(root)
+        top.title("Confirm identifiers to remove")
+        top.geometry("640x520")
+        tk.Label(top, wraplength=600, justify="left", padx=12, pady=8,
+                 text="These words were found in the pack and could identify "
+                      "a customer. TICK the ones that are customer names, "
+                      "project names, people or part numbers. LEAVE UNTICKED "
+                      "anything that is a material, a machine, or an ordinary "
+                      "word.").pack(fill="x")
+        canvas = tk.Canvas(top, highlightthickness=0)
+        sb = tk.Scrollbar(top, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        vars_ = []
+        for term, reason, strong in found:
+            v = tk.BooleanVar(value=strong)
+            vars_.append((v, term))
+            tk.Checkbutton(inner, variable=v, anchor="w", justify="left",
+                           text=f"{term}    -  {reason}").pack(fill="x",
+                                                               padx=12)
+        canvas.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        sb.pack(side="right", fill="y")
+        btns = tk.Frame(top)
+        btns.pack(side="bottom", fill="x", pady=8)
+
+        def confirm():
+            chosen = [t for v, t in vars_ if v.get()]
+            if chosen:
+                path = append_terms(chosen)
+                messagebox.showinfo("Terms saved",
+                                    f"{len(chosen)} term(s) added to "
+                                    f"{path.name}. Now run 'Clean the "
+                                    "pack'.")
+            top.destroy()
+            refresh_terms_label()
+
+        tk.Button(btns, text="Add ticked terms", font=bold,
+                  command=confirm).pack(side="left", padx=12)
+        tk.Button(btns, text="Cancel", command=top.destroy).pack(side="left")
+
+    row1b = tk.Frame(frm)
+    row1b.pack(fill="x", pady=(0, 4))
+    tk.Label(row1b, text="", width=7).pack(side="left")
+    tk.Button(row1b, text="Suggest terms from this pack",
+              command=suggest).pack(side="left")
+    tk.Label(row1b, text="finds likely customer identifiers for you to "
+             "confirm", fg="#555555").pack(side="left", padx=8)
+
     # step 2
     row2 = tk.Frame(frm)
     row2.pack(fill="x", pady=4)
@@ -525,7 +726,25 @@ def main():
                     help="neutral part name, e.g. housing-01")
     ap.add_argument("--terms", help="path to terms.txt (default: next to "
                     "this script)")
+    ap.add_argument("--suggest", action="store_true",
+                    help="scan the pack and print likely identifier terms "
+                    "instead of cleaning")
     args = ap.parse_args()
+    if args.suggest:
+        lits, regs, _ = load_terms(args.terms)
+        pats = build_patterns(lits, regs)
+        found = suggest_terms(args.folder, pats)
+        if not found:
+            print("No new term candidates found.")
+            return
+        print("Likely identifiers (add the real ones to terms.txt):\n")
+        for term, reason, strong in found:
+            mark = "*" if strong else " "
+            print(f"  {mark} {term:<24} {reason}")
+        print("\n  * = high confidence. Review before adding - keep material"
+              " codes,\n      machine brands and generic words OUT of the "
+              "list.")
+        return
     res = process_pack(args.folder, args.name, args.terms)
     print(res["report"])
     print(f"\nreport : {res['report_path']}\nmap    : {res['map_path']}")
