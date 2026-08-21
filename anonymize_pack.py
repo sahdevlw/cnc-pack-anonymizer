@@ -427,7 +427,17 @@ def process_pack(folder, name, terms_path=None):
                     what = f"{hits} identifier(s) scrubbed"
                     if guarantee:
                         what += f"; {guarantee}"
-                    changed.append((str(rel), newbase, what))
+                    # show the vendor exactly which lines were edited
+                    edits = []
+                    for i, (a, b) in enumerate(zip(text.splitlines(),
+                                                   cleaned.splitlines()), 1):
+                        if a != b:
+                            edits.append(f"        line {i}: {b.strip()}")
+                            if len(edits) == 4:
+                                edits.append("        ... (more edits not "
+                                             "shown)")
+                                break
+                    changed.append((str(rel), newbase, what, edits))
                     note = "scrubbed"
         elif ext in PDF_EXT:
             dest.write_bytes(raw)
@@ -460,7 +470,7 @@ def process_pack(folder, name, terms_path=None):
         if renamed:
             rename_rows.append((str(rel), str(dest.relative_to(out))))
             if not note:
-                changed.append((str(rel), newbase, "renamed only"))
+                changed.append((str(rel), newbase, "renamed only", []))
         elif not note and ext not in PDF_EXT and ext not in CAM_EXT:
             clean.append(str(rel))
 
@@ -476,8 +486,9 @@ def process_pack(folder, name, terms_path=None):
                      "terms.txt next to this script and run again.")
     lines.append("")
     lines.append(f"[CHANGED]  {len(changed)} file(s) renamed and/or scrubbed:")
-    for old, new, what in changed:
+    for old, new, what, edits in changed:
         lines.append(f"  - {old}  ->  {new}   ({what})")
+        lines.extend(edits)
     lines += ["", f"[MANUAL]   {len(manual)} file(s) STILL NEED MANUAL WORK "
               "before sending:"]
     for relname, what in manual:
